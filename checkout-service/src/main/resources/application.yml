@@ -1,0 +1,41 @@
+server:
+  port: 8090
+
+spring:
+  application:
+    name: checkout-service
+  threads:
+    virtual:
+      enabled: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health, prometheus
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+
+# --- checkout-vault specific config ---
+checkout-vault:
+  isolation:
+    mode: naive   # naive | isolated — naive version first, per plan step 2
+
+  dependencies:
+    fraud:
+      base-url: http://localhost:8080
+      path: /fraud/score
+      permits: 5
+      timeout-ms: 500
+    payment:
+      base-url: http://localhost:8081
+      path: /payment/charge
+      permits: 5
+      timeout-ms: 500
+    inventory:
+      base-url: http://localhost:8082
+      path: /inventory/SKU-123
+      permits: 5
+      timeout-ms: 500
