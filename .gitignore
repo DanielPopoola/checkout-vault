@@ -44,3 +44,5 @@ application-local.yml
 *.code-workspace
 
 .pids
+
+threaddump.json

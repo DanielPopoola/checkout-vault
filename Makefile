@@ -4,7 +4,13 @@
 
 PIDS_DIR := .pids
 
-.PHONY: mocks-up mocks-down checkout-run clean-pids
+.PHONY: mocks-up mocks-down checkout-run clean-pids loadtest
+
+# Configurable via: make loadtest RATE=50 DURATION=15s FAULT_MODE=slow FAULT_DELAY_MS=3000
+RATE ?= 10
+DURATION ?= 15s
+FAULT_MODE ?= hang
+FAULT_DELAY_MS ?= 3000
 
 mocks-up:
 	@mkdir -p $(PIDS_DIR)
@@ -33,3 +39,10 @@ clean-pids:
 
 checkout-run:
 	@cd checkout-service && mvn spring-boot:run
+
+loadtest:
+	@cd loadtest && go run . \
+		-rate=$(RATE) \
+		-duration=$(DURATION) \
+		-fault-mode=$(FAULT_MODE) \
+		-fault-delay-ms=$(FAULT_DELAY_MS)
