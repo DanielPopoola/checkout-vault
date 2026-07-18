@@ -42,3 +42,5 @@ application-local.yml
 .dokugen-cache.json
 
 *.code-workspace
+
+.pids

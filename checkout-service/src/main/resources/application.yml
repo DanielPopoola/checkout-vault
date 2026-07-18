@@ -6,13 +6,13 @@ spring:
     name: checkout-service
   threads:
     virtual:
-      enabled: true
+      enabled: true   # Spring Boot 4 / Java 21: request-handling threads become virtual threads
 
 management:
   endpoints:
     web:
       exposure:
-        include: health, prometheus
+        include: health, prometheus, threaddump
   prometheus:
     metrics:
       export:
