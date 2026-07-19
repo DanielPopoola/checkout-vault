@@ -2,6 +2,7 @@ package com.checkoutvault.checkoutservice.client;
 
 import com.checkoutvault.checkoutservice.config.CheckoutVaultProperties;
 import java.time.Duration;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Component;
 
 
@@ -12,7 +13,10 @@ public class FraudClient {
     private final DependencyClient dependencyClient;
     private final CheckoutVaultProperties.DependencyProperties config;
 
-    public FraudClient(DependencyClient dependencyClient, CheckoutVaultProperties properties) {
+    public FraudClient(
+        @Qualifier("fraudDependencyClient") DependencyClient dependencyClient, 
+        CheckoutVaultProperties properties
+    ) {
         this.dependencyClient = dependencyClient;
         this.config = properties.dependencies().fraud();
     }
