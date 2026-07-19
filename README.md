@@ -127,63 +127,51 @@ This project implements the Bulkhead pattern using a combination of per-dependen
 
 ```mermaid
 flowchart LR
-    subgraph Config
+    subgraph Config["Config"]
         CVProperties["CheckoutVaultProperties (application.yml)"]
     end
-
-    subgraph Service Layer
+    subgraph ServiceLayer["Service Layer"]
         CheckoutService
     end
-
-    subgraph Client Layer
+    subgraph ClientLayer["Client Layer"]
         FC["FraudClient"]
         PC["PaymentClient"]
         IC["InventoryClient"]
     end
-
-    subgraph HTTP Clients (Isolated Mode)
+    subgraph HttpClients["HTTP Clients (Isolated Mode)"]
         HCF["HttpClient (Fraud)"]
         HCP["HttpClient (Payment)"]
         HCI["HttpClient (Inventory)"]
     end
-
-    subgraph Dependency Isolation (Decorators)
+    subgraph Decorators["Dependency Isolation (Decorators)"]
         IDF["IsolatedDependencyClient (Fraud)"]
         IDP["IsolatedDependencyClient (Payment)"]
         IDI["IsolatedDependencyClient (Inventory)"]
     end
-
-    subgraph External Mocks
+    subgraph ExternalMocks["External Mocks"]
         MOCKF["Fraud Mock"]
         MOCKP["Payment Mock"]
         MOCKI["Inventory Mock"]
     end
-
     CVProperties -- "Isolation Mode: isolated" --> HttpClientConfig
     CVProperties -- "Permits, Timeout" --> IDF
     CVProperties -- "Permits, Timeout" --> IDP
     CVProperties -- "Permits, Timeout" --> IDI
-
     HttpClientConfig -- "Provides" --> HCF
     HttpClientConfig -- "Provides" --> HCP
     HttpClientConfig -- "Provides" --> HCI
-
     FC -- "Uses" --> IDF
     PC -- "Uses" --> IDP
     IC -- "Uses" --> IDI
-
     IDF -- "Delegates" --> HCF
     IDP -- "Delegates" --> HCP
     IDI -- "Delegates" --> HCI
-
     CheckoutService --> FC
     CheckoutService --> PC
     CheckoutService --> IC
-
     HCF --> MOCKF
     HCP --> MOCKP
     HCI --> MOCKI
-
     style HCF fill:#2e1065,stroke:#8b5cf6,stroke-width:2px,color:#fff
     style HCP fill:#2e1065,stroke:#8b5cf6,stroke-width:2px,color:#fff
     style HCI fill:#2e1065,stroke:#8b5cf6,stroke-width:2px,color:#fff
