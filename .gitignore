@@ -45,4 +45,5 @@ application-local.yml
 
 .pids
 
-*.json
+threaddump.json
+threaddump-*.json 

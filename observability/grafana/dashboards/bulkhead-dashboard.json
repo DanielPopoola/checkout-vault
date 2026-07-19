@@ -1,0 +1,71 @@
+{
+  "title": "checkout-vault — Bulkhead Isolation",
+  "uid": "checkout-vault-bulkhead",
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "2s",
+  "time": { "from": "now-5m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Per-dependency latency (p50 / p99)",
+      "type": "timeseries",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 0 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "drawStyle": "line", "lineWidth": 2 } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "checkout_dependency_latency_seconds{quantile=\"0.5\"}",
+          "legendFormat": "{{dependency}} p50"
+        },
+        {
+          "expr": "checkout_dependency_latency_seconds{quantile=\"0.99\"}",
+          "legendFormat": "{{dependency}} p99"
+        }
+      ],
+      "description": "Fraud and Payment should stay flat and near their ~50ms baseline regardless of Inventory's health. If isolation is broken, Fraud/Payment lines will spike alongside Inventory's."
+    },
+    {
+      "id": 2,
+      "title": "Call outcome rate per dependency",
+      "type": "timeseries",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 9 },
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "drawStyle": "line", "fillOpacity": 20, "stacking": { "mode": "normal" } } },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "sum by (dependency, outcome) (rate(checkout_dependency_calls_total[10s]))",
+          "legendFormat": "{{dependency}} - {{outcome}}"
+        }
+      ],
+      "description": "Watch Inventory's bulkhead_full/timeout rate climb during fault injection, while Fraud/Payment's success rate stays essentially 100%."
+    },
+    {
+      "id": 3,
+      "title": "Permits available (live bulkhead state)",
+      "type": "timeseries",
+      "gridPos": { "h": 9, "w": 24, "x": 0, "y": 18 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "min": 0,
+          "max": 5,
+          "custom": { "drawStyle": "line", "lineWidth": 2, "fillOpacity": 10 }
+        },
+        "overrides": []
+      },
+      "targets": [
+        {
+          "expr": "checkout_dependency_permits_available",
+          "legendFormat": "{{dependency}}"
+        }
+      ],
+      "description": "This IS the bulkhead, visualized. During fault injection, Inventory's line should pin at 0 (all 5 permits checked out by hung calls) while Fraud/Payment stay near 5 — proof their capacity was never touched."
+    }
+  ]
+}
