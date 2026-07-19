@@ -1,174 +1,291 @@
 # checkout-vault
 
-A bulkhead isolation demo: a checkout service that calls three downstream
-dependencies (Fraud, Payment, Inventory) over HTTP, and proves — with real
-load tests and live metrics, not just theory — that a hung Inventory
-dependency can silently degrade Fraud and Payment too, unless each
-dependency's outbound calls are physically and logically isolated from
-each other.
+This project helps you build a checkout service that stays resilient even when its external dependencies struggle. It solves the common problem of cascading failures in microservices by isolating calls to services like fraud, payment, and inventory. This ensures critical payment and fraud checks remain stable if an unrelated service slows down or hangs.
 
-Built as a from-scratch learning project to understand the Bulkhead
-pattern, the difference between resource isolation and failure detection
-(Bulkhead vs. Circuit Breaker), and pool sizing as a real, evidence-backed
-engineering decision rather than a guess.
+## Installation
 
-## What's actually being proven
+Getting `checkout-vault` up and running on your local machine is straightforward. Follow these steps:
 
-1. **Naive version**: Fraud, Payment, and Inventory share one
-   `HttpClient` instance under the hood. When Inventory is set to `hang`
-   mode, its stuck connections consume worker threads from the *same*
-   shared pool Fraud and Payment need — even though Fraud and Payment are
-   completely healthy. Confirmed via live thread dumps during load
-   testing, not just inferred from latency numbers.
-2. **Isolated version**: each dependency gets its own dedicated
-   `HttpClient` (its own connection pool/executor) *and* its own
-   `Semaphore` (bounding concurrent in-flight calls, with a timeout so a
-   caller never waits unboundedly for a permit). A hung Inventory can
-   now fail up to 100% of its own traffic without Fraud or Payment's
-   latency or success rate moving at all — confirmed with real
-   Prometheus metrics captured per dependency, not just end-to-end
-   numbers.
+1.  **Clone the Repository**
+    Start by cloning the project to your local machine:
+    ```bash
+    git clone https://github.com/DanielPopoola/checkout-vault.git
+    cd checkout-vault
+    ```
 
-## Architecture
+2.  **Start the Mock Services**
+    The project uses Go-based mock services for Fraud, Payment, and Inventory. These will listen on ports `8080`, `8081`, and `8082` respectively.
+    ```bash
+    make mocks-up
+    ```
+    To stop them:
+    ```bash
+    make mocks-down
+    ```
 
-```
-mocks/            Go — one parameterized mock server, run 3x as
-                   Fraud/Payment/Inventory. Each supports normal/slow/
-                   hang/error modes, switchable at runtime via /control.
+3.  **Start the Checkout Service**
+    The `checkout-service` is a Spring Boot application. Before starting, you can choose the isolation mode in `checkout-service/src/main/resources/application.yml`. For demonstrating bulkhead isolation, set `checkout-vault.isolation.mode` to `isolated`.
+    ```yaml
+    checkout-vault:
+      isolation:
+        mode: isolated # Change to 'naive' to see the isolation bug
+    ```
+    Then, run the service:
+    ```bash
+    make checkout-run
+    ```
+    The service will run on port `8090`.
 
-checkout-service/  Java 21 + Spring Boot (virtual threads enabled).
-  config/          CheckoutVaultProperties — the only place
-                   application.yml is read; validated at startup.
-  client/          DependencyClient interface + HTTP implementation,
-                   decorated with IsolatedDependencyClient (semaphore +
-                   Micrometer instrumentation). HttpClientConfig is the
-                   ONE place isolation.mode is consulted — naive mode
-                   shares one HttpClient across all three dependencies,
-                   isolated mode gives each its own.
-  service/         CheckoutService — orchestrates Fraud (gate) →
-                   Payment (gate), Inventory fired fire-and-forget,
-                   concurrently, never blocking the response.
-  handler/         POST /checkout controller (thin, transport only).
+4.  **Set Up Observability (Prometheus + Grafana)**
+    For real-time metrics and visualization of the bulkhead behavior, start Prometheus and Grafana.
+    ```bash
+    make observability-up
+    ```
+    You can access them here:
+    *   **Prometheus**: `http://localhost:9090` (check "Status -> Targets" to confirm `checkout-service` is `UP`)
+    *   **Grafana**: `http://localhost:3000` (the "checkout-vault — Bulkhead Isolation" dashboard is auto-provisioned)
 
-loadtest/          Go — fires concurrent requests at /checkout, injects
-                   an Inventory fault mid-run via its /control endpoint,
-                   compares before/after stats against fixed thresholds,
-                   prints PASS/FAIL.
+    To stop them:
+    ```bash
+    make observability-down
+    ```
 
-observability/     Prometheus scrape config + Grafana dashboard
-                   (provisioned automatically) showing per-dependency
-                   latency, call outcome rate, and live semaphore permit
-                   availability — the last one is the bulkhead itself,
-                   visualized.
-```
+## Usage
 
-## Call shape
+Once all services are running, you can use the `loadtest` tool to simulate traffic and verify the isolation mechanisms.
 
-- **Fraud** is called first. Fails or times out → checkout is rejected
-  immediately, **Payment is never called** (charging an order already
-  known to be rejected would be exactly the "failing open" risk this
-  project is designed to avoid).
-- **Payment** is only called if Fraud succeeds. Fails or times out →
-  rejected.
-- **Inventory** is fired at the very start of the request, concurrently,
-  independent of Fraud/Payment's outcome — and its result is never
-  awaited by the response. This matches the real checkout architecture
-  the project is scoped from: Inventory/Shipping checks happen on a
-  separate path, after payment, not synchronously in the checkout
-  response. Every approved order reports `"pending confirmation"` for
-  inventory status, regardless of whether Inventory succeeded, failed,
-  or was mid-flight when the response went out.
+1.  **Run the Load Test / Verifier**
+    The `loadtest` utility will send requests to the `checkout-service`, inject a fault into the Inventory mock mid-run, and then compare performance statistics between the baseline and fault-run phases.
+    
+    To run with default settings (10 requests/second, 15 seconds duration for each phase, Inventory set to `hang` mode):
+    ```bash
+    make loadtest
+    ```
+    You can customize the load test parameters:
+    ```bash
+    make loadtest RATE=50 FAULT_MODE=slow FAULT_DELAY_MS=3000 DURATION=20s
+    ```
+    *   `RATE`: Requests per second.
+    *   `FAULT_MODE`: Mode to inject into Inventory (`hang` or `slow`).
+    *   `FAULT_DELAY_MS`: Delay in milliseconds if `FAULT_MODE` is `slow`.
+    *   `DURATION`: Duration of each phase (baseline and fault-run).
 
-## Isolation mechanism
+2.  **Observe Metrics in Grafana**
+    While the load test is running, keep an eye on the Grafana dashboard (`http://localhost:3000`). You'll be able to see:
+    *   Per-dependency latency (p50 / p99)
+    *   Call outcome rates per dependency (success, failure, timeout, bulkhead\_full)
+    *   Live semaphore permit availability for each dependency (this is the bulkhead visualized!)
 
-**Semaphore + timeout per dependency, not a dedicated OS thread pool per
-dependency.** With Java 21 virtual threads enabled, a raw thread-pool
-bulkhead (Hystrix's original approach) doesn't map cleanly — virtual
-threads are nearly free, so "thread pool size" stops being the scarce
-resource. What's still finite: the underlying HTTP client's connection
-handling. A live thread dump during load testing confirmed this
-directly — a shared `HttpClient` has a real, bounded internal worker
-pool (not the "practically unbounded" behavior the general docs
-describe), and that pool is what naive mode leaves accidentally shared.
+    During fault injection (e.g., Inventory in `hang` mode), you should see Inventory's permit gauge pin at 0 while Fraud's and Payment's gauges remain active, proving their capacity was never touched.
 
-The fix pairs two independent mechanisms:
-- **A dedicated `HttpClient` per dependency** (physical separation) —
-  contains the blast radius, so Inventory's hung connections can never
-  compete with Fraud/Payment's for the same worker.
-- **A `Semaphore` per dependency** (concurrency + fail-fast) — bounds
-  how many calls to that dependency can be in flight at once, and
-  ensures a caller never queues unboundedly (which risks OOM under
-  sustained load) — it fails fast once the bulkhead is full, rather than
-  silently piling up.
+## Features
 
-See `TRADEOFFS.md` for the full reasoning, including where this design
-was validated against Netflix/Hystrix's own documented tradeoffs and
-resilience4j's real bulkhead implementations.
+### Resilient Checkout Workflow
 
-## Running it
+The core `checkout-service` orchestrates calls to various downstream dependencies: Fraud, Payment, and Inventory. Fraud and Payment calls are sequential and critical, meaning a failure in one immediately stops the checkout process. The Inventory check, however, is fired concurrently and does not block the main response, marking the order as "pending confirmation" for inventory status. This design ensures the user gets a fast response while critical path dependencies maintain their isolation.
 
-### 1. Start the mocks
+```mermaid
+sequenceDiagram
+  actor User
+  participant CheckoutService as "Checkout Service"
+  participant FraudClient as "Fraud Service"
+  participant PaymentClient as "Payment Service"
+  participant InventoryClient as "Inventory Service"
 
-```bash
-make mocks-up      # starts Fraud (:8080), Payment (:8081), Inventory (:8082)
-make mocks-down     # stops them
-```
+  User->>CheckoutService: POST /checkout (orderPayload)
+  activate CheckoutService
+  CheckoutService->>InventoryClient: async checkStock()
+  activate InventoryClient
+  InventoryClient-->>CheckoutService: Returns stock status (or times out)
+  deactivate InventoryClient
 
-### 2. Start checkout-service
+  CheckoutService->>FraudClient: score(orderPayload)
+  activate FraudClient
+  FraudClient-->>CheckoutService: Fraud Result (Success/Failure)
+  deactivate FraudClient
 
-Set `checkout-vault.isolation.mode` in
-`checkout-service/src/main/resources/application.yml` to `naive` or
-`isolated`, then:
+  alt Fraud Success
+    CheckoutService->>PaymentClient: charge(orderPayload)
+    activate PaymentClient
+    PaymentClient-->>CheckoutService: Payment Result (Success/Failure)
+    deactivate PaymentClient
 
-```bash
-make checkout-run
+    alt Payment Success
+      CheckoutService-->>User: APPROVED ("pending confirmation")
+    else Payment Failure
+      CheckoutService-->>User: REJECTED ("payment failed")
+    end
+  else Fraud Failure
+    CheckoutService-->>User: REJECTED ("fraud check failed")
+  end
+  deactivate CheckoutService
 ```
 
-Runs in the foreground on `:8090`.
+### Bulkhead Isolation with Dedicated HTTP Clients
 
-### 3. Run the load test / verifier
+This project implements the Bulkhead pattern using a combination of per-dependency semaphores and dedicated `HttpClient` instances. In "isolated" mode, each dependency (Fraud, Payment, Inventory) gets its own `HttpClient` with a small, explicitly sized thread pool and a semaphore to cap in-flight requests. This physical separation prevents a backlog of requests or hung connections in one dependency from consuming resources needed by others.
 
-```bash
-make loadtest                                            # defaults: 10 req/s, 15s, hang
-make loadtest RATE=50 FAULT_MODE=hang DURATION=15s
-make loadtest RATE=50 FAULT_MODE=slow FAULT_DELAY_MS=3000
+```mermaid
+flowchart LR
+    subgraph Config
+        CVProperties["CheckoutVaultProperties (application.yml)"]
+    end
+
+    subgraph Service Layer
+        CheckoutService
+    end
+
+    subgraph Client Layer
+        FC["FraudClient"]
+        PC["PaymentClient"]
+        IC["InventoryClient"]
+    end
+
+    subgraph HTTP Clients (Isolated Mode)
+        HCF["HttpClient (Fraud)"]
+        HCP["HttpClient (Payment)"]
+        HCI["HttpClient (Inventory)"]
+    end
+
+    subgraph Dependency Isolation (Decorators)
+        IDF["IsolatedDependencyClient (Fraud)"]
+        IDP["IsolatedDependencyClient (Payment)"]
+        IDI["IsolatedDependencyClient (Inventory)"]
+    end
+
+    subgraph External Mocks
+        MOCKF["Fraud Mock"]
+        MOCKP["Payment Mock"]
+        MOCKI["Inventory Mock"]
+    end
+
+    CVProperties -- "Isolation Mode: isolated" --> HttpClientConfig
+    CVProperties -- "Permits, Timeout" --> IDF
+    CVProperties -- "Permits, Timeout" --> IDP
+    CVProperties -- "Permits, Timeout" --> IDI
+
+    HttpClientConfig -- "Provides" --> HCF
+    HttpClientConfig -- "Provides" --> HCP
+    HttpClientConfig -- "Provides" --> HCI
+
+    FC -- "Uses" --> IDF
+    PC -- "Uses" --> IDP
+    IC -- "Uses" --> IDI
+
+    IDF -- "Delegates" --> HCF
+    IDP -- "Delegates" --> HCP
+    IDI -- "Delegates" --> HCI
+
+    CheckoutService --> FC
+    CheckoutService --> PC
+    CheckoutService --> IC
+
+    HCF --> MOCKF
+    HCP --> MOCKP
+    HCI --> MOCKI
+
+    style HCF fill:#2e1065,stroke:#8b5cf6,stroke-width:2px,color:#fff
+    style HCP fill:#2e1065,stroke:#8b5cf6,stroke-width:2px,color:#fff
+    style HCI fill:#2e1065,stroke:#8b5cf6,stroke-width:2px,color:#fff
+    style MOCKF fill:#451a03,stroke:#f59e0b,stroke-width:2px,color:#fff
+    style MOCKP fill:#451a03,stroke:#f59e0b,stroke-width:2px,color:#fff
+    style MOCKI fill:#451a03,stroke:#f59e0b,stroke-width:2px,color:#fff
+    style CheckoutService fill:#1D3557,stroke:#457B9D,stroke-width:2px,color:#fff
+    style FC fill:#1D3557,stroke:#457B9D,stroke-width:2px,color:#fff
+    style PC fill:#1D3557,stroke:#457B9D,stroke-width:2px,color:#fff
+    style IC fill:#1D3557,stroke:#457B9D,stroke-width:2px,color:#fff
+    style IDF fill:#0f172a,stroke:#3b82f6,stroke-width:2px,color:#fff
+    style IDP fill:#0f172a,stroke:#3b82f6,stroke-width:2px,color:#fff
+    style IDI fill:#0f172a,stroke:#3b82f6,stroke-width:2px,color:#fff
 ```
 
-Runs a baseline phase (all mocks `normal`), then injects the fault into
-Inventory, then compares Fraud/Payment-path latency and success rate
-between the two phases. Prints PASS/FAIL against fixed thresholds (see
-`TRADEOFFS.md` for the exact numbers and reasoning).
+### Real-time Observability with Prometheus & Grafana
 
-### 4. Observability (Prometheus + Grafana)
+The system is instrumented with Micrometer to expose detailed metrics about dependency calls, latency percentiles (p50, p99), and the real-time state of each dependency's semaphore (permits available). Prometheus scrapes these metrics, which are then visualized in an auto-provisioned Grafana dashboard, providing clear insight into bulkhead behavior and system health.
 
-```bash
-make observability-up
+```mermaid
+sequenceDiagram
+  participant CheckoutService as "Checkout Service"
+  participant Micrometer as "Micrometer Metrics"
+  participant Prometheus as "Prometheus Server"
+  participant Grafana as "Grafana Dashboard"
+  actor Developer
+
+  CheckoutService->>Micrometer: Record call latency, outcome, permits
+  Micrometer->>Prometheus: Expose /actuator/prometheus endpoint
+  Prometheus->>CheckoutService: Scrape metrics (every 2s)
+  Developer->>Grafana: View Dashboard
+  Grafana->>Prometheus: Query metrics for visualization
+  Prometheus-->>Grafana: Return time-series data
+  Grafana-->>Developer: Display real-time graphs
 ```
 
-- Prometheus: http://localhost:9090 (Status → Targets to confirm
-  `checkout-service` is `UP`)
-- Grafana: http://localhost:3000 (anonymous access enabled; dashboard
-  "checkout-vault — Bulkhead Isolation" is auto-provisioned)
+## System Architecture / Design
 
-Run the load test while watching the dashboard live to see Inventory's
-permit gauge pin at 0 while Fraud/Payment's stay near full capacity.
+The `checkout-vault` project demonstrates microservice resilience through a client-server architecture interacting with mock dependencies and an observability stack. The Go-based load test client simulates user traffic and controls the behavior of the mock services. The core `checkout-service`, built with Spring Boot, handles checkout requests and communicates with Fraud, Payment, and Inventory mock services. Prometheus and Grafana provide real-time monitoring of the system's health and isolation effectiveness.
 
-```bash
-make observability-down
+```mermaid
+flowchart LR
+    Client["Load Test Client (Go)"]
+    subgraph Core Services
+        CheckoutService["Checkout Service (Spring Boot)"]
+    end
+    subgraph Mock Dependencies
+        FraudMock["Fraud Mock (Go)"]
+        PaymentMock["Payment Mock (Go)"]
+        InventoryMock["Inventory Mock (Go)"]
+    end
+    subgraph Observability
+        Prometheus["Prometheus"]
+        Grafana["Grafana"]
+    end
+
+    Client --> CheckoutService -- "HTTP POST /checkout" --> FraudMock
+    CheckoutService -- "HTTP POST /checkout" --> PaymentMock
+    CheckoutService -- "HTTP GET /inventory/SKU-123" --> InventoryMock
+
+    Client -- "Control Mock Mode" --> FraudMock
+    Client -- "Control Mock Mode" --> PaymentMock
+    Client -- "Control Mock Mode" --> InventoryMock
+
+    CheckoutService --> Prometheus -- "Scrapes Metrics" --> Grafana
+
+    style Client fill:#1e1b4b,stroke:#6366f1,stroke-width:2px,color:#fff
+    style CheckoutService fill:#2e1065,stroke:#8b5cf6,stroke-width:2px,color:#fff
+    style FraudMock fill:#451a03,stroke:#f59e0b,stroke-width:2px,color:#fff
+    style PaymentMock fill:#451a03,stroke:#f59e0b,stroke-width:2px,color:#fff
+    style InventoryMock fill:#451a03,stroke:#f59e0b,stroke-width:2px,color:#fff
+    style Prometheus fill:#0f172a,stroke:#3b82f6,stroke-width:2px,color:#fff
+    style Grafana fill:#022c22,stroke:#10b981,stroke-width:2px,color:#fff
 ```
 
-## What's NOT built (by design — see PLAN.md non-goals)
+## Technologies Used
 
-- No real fraud/payment/inventory business logic — mocks return
-  hardcoded payloads; only their timing/availability is simulated.
-- No persistence or database.
-- No actual circuit breaker implementation — discussed conceptually in
-  `TRADEOFFS.md` as a contrast to Bulkhead, not built alongside it.
-- No per-tenant isolation.
+| Technology | Description |
+|---|---|
+| ![Spring Boot](https://img.shields.io/badge/Spring_Boot-6DB33F?style=for-the-badge&logo=spring-boot&logoColor=white) | Powers the `checkout-service` with its robust framework. |
+| ![Java 21](https://img.shields.io/badge/Java-007396?style=for-the-badge&logo=java&logoColor=white) | Used for the `checkout-service`, leveraging virtual threads for concurrency. |
+| ![Go](https://img.shields.io/badge/Go-00ADD8?style=for-the-badge&logo=go&logoColor=white) | Implements the lightweight mock services and the load test harness. |
+| ![Prometheus](https://img.shields.io/badge/Prometheus-E6522C?style=for-the-badge&logo=prometheus&logoColor=white) | Collects metrics for real-time monitoring and analysis. |
+| ![Grafana](https://img.shields.io/badge/Grafana-F46800?style=for-the-badge&logo=grafana&logoColor=white) | Visualizes metrics through powerful dashboards for observability. |
+| ![Micrometer](https://img.shields.io/badge/Micrometer-2A7AE6?style=for-the-badge&logo=spring&logoColor=white) | Provides a vendor-neutral application observability facade for instrumenting services. |
 
-## Further reading
+## Further Reading
 
-- `TRADEOFFS.md` — the project's actual deliverable: isolation mechanism
-  justification, pool sizing derivation, bulkhead-vs-circuit-breaker
-  gap demonstrated with real fault injection, what breaks first under
-  10x load, and what would change with more time.
+*   [`TRADEOFFS.md`](https://github.com/DanielPopoola/checkout-vault/blob/main/TRADEOFFS.md) — Dive deeper into the project's design decisions, including the isolation mechanism justification, pool sizing derivation, the bulkhead-vs-circuit-breaker discussion, and insights into what broke first under stress.
+
+## Author Info
+
+*   **LinkedIn**: <https://www.linkedin.com/in/daniel-popoola-942aa8216/>
+*   **X (Twitter)**: <https://x.com/iamuchihadan>
+
+## Badges
+
+[![Spring Boot](https://img.shields.io/badge/Spring_Boot-6DB33F?style=for-the-badge&logo=spring-boot&logoColor=white)](https://spring.io/projects/spring-boot)
+[![Java 21](https://img.shields.io/badge/Java-007396?style=for-the-badge&logo=java&logoColor=white)](https://www.java.com/)
+[![Go](https://img.shields.io/badge/Go-00ADD8?style=for-the-badge&logo=go&logoColor=white)](https://golang.org/)
+[![Prometheus](https://img.shields.io/badge/Prometheus-E6522C?style=for-the-badge&logo=prometheus&logoColor=white)](https://prometheus.io/)
+[![Grafana](https://img.shields.io/badge/Grafana-F46800?style=for-the-badge&logo=grafana&logoColor=white)](https://grafana.com/)
+[![Micrometer](https://img.shields.io/badge/Micrometer-2A7AE6?style=for-the-badge&logo=spring&logoColor=white)](https://micrometer.io/)
+
+[![Readme was generated by Dokugen](https://img.shields.io/badge/Readme%20was%20generated%20by-Dokugen-brightgreen)](https://dokugen.samueltuoyo.com)
